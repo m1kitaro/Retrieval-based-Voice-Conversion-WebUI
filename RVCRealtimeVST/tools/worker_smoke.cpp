@@ -33,7 +33,7 @@ int main(const int argc, char** argv)
 
   rvc::WorkerClient worker;
   if (argc < 4) {
-      std::cerr << "Usage: rvc-worker-smoke RVC_ROOT PYTHON_EXE MODEL_PTH [INDEX] [BLOCK_MS] [CROSSFADE_MS] [BLOCK_COUNT]\n";
+      std::cerr << "Usage: rvc-worker-smoke RVC_ROOT PYTHON_EXE MODEL_PTH [INDEX] [BLOCK_MS] [CROSSFADE_MS] [BLOCK_COUNT] [CONTEXT_MS]\n";
       return EXIT_FAILURE;
   }
   worker.setPath(rvc::kStateRvcRoot, argv[1]);
@@ -45,6 +45,8 @@ int main(const int argc, char** argv)
   if (argc > 6)
       worker.setParameter(rvc::kParamCrossfadeMs, std::stof(argv[6]));
   const std::size_t blockCount = argc > 7 ? std::max<std::size_t>(1, std::stoul(argv[7])) : 1;
+  if (argc > 8)
+      worker.setParameter(rvc::kParamExtraMs, std::stof(argv[8]));
   worker.setSampleRate(sampleRate);
     worker.setEnabled(true);
 

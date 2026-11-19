@@ -9,6 +9,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$Generator = if ($env:RVC_VST_CMAKE_GENERATOR) { $env:RVC_VST_CMAKE_GENERATOR } else { "Visual Studio 17 2022" }
+
 $Root = Split-Path -Parent $PSScriptRoot
 $Build = Join-Path $Root "build"
 
@@ -26,7 +28,7 @@ if (-not [string]::IsNullOrWhiteSpace($Index) -and -not (Test-Path -LiteralPath 
     throw "Index path does not exist: $Index"
 }
 
-cmake -S $Root -B $Build -G "Visual Studio 17 2022" -A x64 -DRVC_BUILD_SMOKE_TEST=ON
+cmake -S $Root -B $Build -G $Generator -A x64 -DRVC_BUILD_SMOKE_TEST=ON
 if ($LASTEXITCODE -ne 0) {
     throw "CMake configuration failed with exit code $LASTEXITCODE"
 }

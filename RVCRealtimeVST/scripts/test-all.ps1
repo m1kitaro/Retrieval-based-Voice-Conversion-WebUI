@@ -8,6 +8,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$Generator = if ($env:RVC_VST_CMAKE_GENERATOR) { $env:RVC_VST_CMAKE_GENERATOR } else { "Visual Studio 17 2022" }
+
 $Root = Split-Path -Parent $PSScriptRoot
 $Build = Join-Path $Root "build"
 $Dist = Join-Path $Root "dist"
@@ -16,7 +18,7 @@ $Validator = Join-Path $ValidatorBuild "bin\Release\validator.exe"
 
 & (Join-Path $PSScriptRoot "build.ps1")
 
-cmake -S $Root -B $Build -G "Visual Studio 17 2022" -A x64 -DRVC_BUILD_SMOKE_TEST=ON
+cmake -S $Root -B $Build -G $Generator -A x64 -DRVC_BUILD_SMOKE_TEST=ON
 if ($LASTEXITCODE -ne 0) {
     throw "CMake configuration failed with exit code $LASTEXITCODE"
 }
@@ -41,7 +43,7 @@ if (-not (Test-Path $Validator)) {
     if (-not (Test-Path -LiteralPath (Join-Path $ValidatorSdk "CMakeLists.txt") -PathType Leaf)) {
         throw "Short VST3 SDK path is invalid: $ValidatorSdk"
     }
-    cmake -S $ValidatorSdk -B $ValidatorBuild -G "Visual Studio 17 2022" -A x64 `
+    cmake -S $ValidatorSdk -B $ValidatorBuild -G $Generator -A x64 `
         -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF `
         -DSMTG_ENABLE_VST3_HOSTING_EXAMPLES=ON `
         -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF

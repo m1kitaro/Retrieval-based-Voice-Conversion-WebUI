@@ -57,7 +57,7 @@ private:
     uint32_t calculateBlockFrames() const noexcept;
     std::string writeWorkerConfig(const Paths& paths, std::string& error) const;
 
-    static constexpr std::size_t kRingCapacity = 1u << 20;
+    static constexpr std::size_t kRingCapacity = 1u << 22;
     SpscFloatRing inputRing_ {kRingCapacity};
     SpscFloatRing outputRing_ {kRingCapacity};
 

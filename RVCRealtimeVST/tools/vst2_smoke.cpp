@@ -80,11 +80,13 @@ int main(int argc, char** argv)
     float* outputs[] = {outputLeft.data(), outputRight.data()};
     effect->processReplacing(effect, inputs, outputs, frames);
 
+    // Without a worker the plugin must stay silent rather than pass the raw
+    // input through, so measure the output level itself.
     float maxError = 0.0f;
     for (VstInt32 i = 0; i < frames; ++i) {
         const auto index = static_cast<std::size_t>(i);
-        maxError = std::max(maxError, std::abs(outputLeft[index] - left[index]));
-        maxError = std::max(maxError, std::abs(outputRight[index] - right[index]));
+        maxError = std::max(maxError, std::abs(outputLeft[index]));
+        maxError = std::max(maxError, std::abs(outputRight[index]));
     }
 
     const VstInt32 inputsCount = effect->numInputs;
@@ -102,6 +104,6 @@ int main(int argc, char** argv)
     }
 
     std::cout << "VST2 OK inputs=" << inputsCount << " outputs=" << outputsCount
-              << " params=" << paramsCount << " dry_max_error=" << maxError << '\n';
+              << " params=" << paramsCount << " silent_max=" << maxError << '\n';
     return EXIT_SUCCESS;
 }

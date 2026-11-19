@@ -150,9 +150,9 @@ RVCRealtime::RVCRealtime(const InstanceInfo& info)
   GetParam(kIndexRate)->InitDouble("Index", 0.0, 0.0, 1.0, 0.001);
   GetParam(kRmsMix)->InitDouble("RMS Mix", 0.5, 0.0, 1.0, 0.001);
   GetParam(kThreshold)->InitDouble("Gate", -60.0, -60.0, 0.0, 0.1, "dB");
-  GetParam(kBlockMs)->InitInt("Block", 130, 20, 1000, "ms");
-  GetParam(kCrossfadeMs)->InitInt("Crossfade", 80, 10, 100, "ms");
-  GetParam(kExtraMs)->InitInt("Context", 2000, 500, 3000, "ms");
+  GetParam(kBlockMs)->InitInt("Block", 130, 20, 3000, "ms");
+  GetParam(kCrossfadeMs)->InitInt("Crossfade", 80, 10, 200, "ms");
+  GetParam(kExtraMs)->InitInt("Context", 2000, 500, 15000, "ms");
   GetParam(kF0Method)->InitEnum("F0 Method", 0, {"RMVPE", "FCPE", "PM"});
   GetParam(kDryWet)->InitDouble("Mix", 100.0, 0.0, 100.0, 0.1, "%");
   GetParam(kOutputGain)->InitDouble("Output", 0.0, -18.0, 12.0, 0.1, "dB");
@@ -332,24 +332,29 @@ void RVCRealtime::ProcessBlock(sample** inputs, sample** outputs, const int nFra
     return;
   }
 
-  // Mono-safe passthrough: never leave output buffers unwritten.
-  auto passthrough = [&]() {
+  // No converted audio available: fade the input out instead of leaking the raw
+  // voice. A worker restart caused by a Block/Crossfade/Context change must
+  // never put the unconverted signal on the output.
+  auto fadeToSilence = [&]() {
+    constexpr float step = 1.0f / 1024.0f;
+    const float start = mActiveBlend;
     for (int channel = 0; channel < nOut; ++channel) {
       const sample* source = inputs[std::min(channel, nIn - 1)];
-      if (outputs[channel] != source)
-        std::memcpy(outputs[channel], source, static_cast<size_t>(nFrames) * sizeof(sample));
+      sample* destination = outputs[channel];
+      float blend = start;
+      for (int frame = 0; frame < nFrames; ++frame) {
+        destination[frame] = static_cast<sample>(source[frame] * blend);
+        blend = std::max(0.0f, blend - step);
+      }
     }
+    mActiveBlend = std::max(0.0f, start - static_cast<float>(nFrames) * step);
   };
 
-  if (nFrames > static_cast<int>(mMonoInput.size())) {
-    passthrough();
-    return;
-  }
-
-  const bool requested = GetParam(kEngine)->Bool();
-  if (!requested || !mWorker.isReady()) {
-    mActiveBlend = std::max(0.0f, mActiveBlend - static_cast<float>(nFrames) / 1024.0f);
-    passthrough();
+  // Anything other than converted audio is muted, engine off included: the raw
+  // voice must never reach the output. Use the host bypass to hear the input.
+  if (!GetParam(kEngine)->Bool() || !mWorker.isReady()
+      || nFrames > static_cast<int>(mMonoInput.size())) {
+    fadeToSilence();
     return;
   }
 

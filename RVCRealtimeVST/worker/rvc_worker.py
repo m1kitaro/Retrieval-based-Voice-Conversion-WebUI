@@ -16,7 +16,11 @@ from pathlib import Path
 MAGIC = 0x50564352
 PROTOCOL_VERSION = 1
 HEADER_BYTES = 4096
-MAX_FRAMES = 131072
+MAX_FRAMES = 1048576
+# infer/rtrvc.py keeps a fixed-size pitch cache of this many 10 ms frames.
+# The whole inference window has to fit inside it, otherwise net_g.infer
+# receives mismatched phone/pitch lengths and raises a size error.
+PITCH_CACHE_FRAMES = 1024
 MAP_BYTES = HEADER_BYTES + MAX_FRAMES * 4 * 2
 INPUT_OFFSET = HEADER_BYTES
 OUTPUT_OFFSET = HEADER_BYTES + MAX_FRAMES * 4
@@ -121,6 +125,18 @@ class RVCStreamEngine:
         self.effective_crossfade_ms = 1000.0 * self.sola_buffer_frame / self.sample_rate
         self.sola_search_frame = self.zc
         self.extra_frame = int(round(self.extra_ms / 1000 * self.sample_rate / self.zc) * self.zc)
+        # Keep block + crossfade + SOLA search + context inside the pitch cache.
+        window_budget = PITCH_CACHE_FRAMES * self.zc
+        fixed_frame = self.block_frame + self.crossfade_frame + self.sola_search_frame
+        if fixed_frame > window_budget:
+            raise ValueError(
+                "block and crossfade exceed the {} ms inference window; reduce Block or Crossfade".format(
+                    1000 * window_budget // self.sample_rate
+                )
+            )
+        self.extra_frame = min(self.extra_frame, window_budget - fixed_frame)
+        self.effective_extra_ms = 1000.0 * self.extra_frame / self.sample_rate
+        self.extra_clamped = self.effective_extra_ms < self.extra_ms - 0.5
 
         self.config = Config()
         self.rvc = rtrvc.RVC(
@@ -271,7 +287,10 @@ def run(args: argparse.Namespace) -> int:
         engine = RVCStreamEngine(cfg)
         write_status(shared, STATUS_LOADING, "Prewarming CUDA and F0")
         engine.prewarm()
-        write_status(shared, STATUS_READY, f"Ready (actual CF {engine.effective_crossfade_ms:.0f} ms)")
+        ready_text = f"Ready (actual CF {engine.effective_crossfade_ms:.0f} ms"
+        if engine.extra_clamped:
+            ready_text += f", context capped at {engine.effective_extra_ms:.0f} ms"
+        write_status(shared, STATUS_READY, ready_text + ")")
 
         import numpy as np
 

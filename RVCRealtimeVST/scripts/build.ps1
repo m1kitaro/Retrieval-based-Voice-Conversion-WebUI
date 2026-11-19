@@ -9,7 +9,8 @@ $Zip = Join-Path $Dist "$PackageName.zip"
 
 & (Join-Path $PSScriptRoot "prepare-dependencies.ps1")
 
-cmake -S $Root -B $Build -G "Visual Studio 17 2022" -A x64
+$Generator = if ($env:RVC_VST_CMAKE_GENERATOR) { $env:RVC_VST_CMAKE_GENERATOR } else { "Visual Studio 17 2022" }
+cmake -S $Root -B $Build -G $Generator -A x64
 if ($LASTEXITCODE -ne 0) {
     throw "CMake configuration failed with exit code $LASTEXITCODE"
 }

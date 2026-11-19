@@ -20,7 +20,7 @@ namespace {
 constexpr uint32_t kMagic = 0x50564352; // RVCP
 constexpr uint32_t kProtocolVersion = 1;
 constexpr uint32_t kHeaderBytes = 4096;
-constexpr uint32_t kMaxFrames = 131072;
+constexpr uint32_t kMaxFrames = 1048576;
 constexpr uint32_t kMapBytes = kHeaderBytes + kMaxFrames * sizeof(float) * 2;
 constexpr uint32_t kInputOffset = kHeaderBytes;
 constexpr uint32_t kOutputOffset = kHeaderBytes + kMaxFrames * sizeof(float);

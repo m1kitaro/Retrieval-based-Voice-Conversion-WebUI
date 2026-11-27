@@ -33,6 +33,9 @@ public:
     bool isReady() const noexcept { return ready_.load(std::memory_order_acquire); }
     int status() const noexcept { return status_.load(std::memory_order_acquire); }
     float inferMs() const noexcept { return inferMs_.load(std::memory_order_relaxed); }
+    float voiceInHz() const noexcept { return voiceInHz_.load(std::memory_order_relaxed); }
+    float voiceOutHz() const noexcept { return voiceOutHz_.load(std::memory_order_relaxed); }
+    float voiceLimitedPercent() const noexcept { return voiceLimitedPercent_.load(std::memory_order_relaxed); }
     float droppedBlocks() const noexcept { return static_cast<float>(droppedBlocks_.load(std::memory_order_relaxed)); }
     uint32_t blockFrames() const noexcept { return blockFrames_.load(std::memory_order_relaxed); }
     uint32_t latencyFrames() const noexcept { return latencyFrames_.load(std::memory_order_relaxed); }
@@ -67,6 +70,9 @@ private:
     std::atomic<bool> ready_ {false};
     std::atomic<int> status_ {kStatusOff};
     std::atomic<float> inferMs_ {0.0f};
+    std::atomic<float> voiceInHz_ {0.0f};
+    std::atomic<float> voiceOutHz_ {0.0f};
+    std::atomic<float> voiceLimitedPercent_ {0.0f};
     std::atomic<uint32_t> droppedBlocks_ {0};
     std::atomic<uint32_t> blockFrames_ {6240};
     std::atomic<uint32_t> latencyFrames_ {12480};

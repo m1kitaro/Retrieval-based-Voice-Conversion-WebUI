@@ -18,13 +18,19 @@ namespace rvc {
 namespace {
 
 constexpr uint32_t kMagic = 0x50564352; // RVCP
-constexpr uint32_t kProtocolVersion = 1;
+constexpr uint32_t kProtocolVersion = 2;
 constexpr uint32_t kHeaderBytes = 4096;
 constexpr uint32_t kMaxFrames = 1048576;
 constexpr uint32_t kMapBytes = kHeaderBytes + kMaxFrames * sizeof(float) * 2;
 constexpr uint32_t kInputOffset = kHeaderBytes;
 constexpr uint32_t kOutputOffset = kHeaderBytes + kMaxFrames * sizeof(float);
 constexpr uint32_t kStatusTextOffset = 128;
+// Pitch limiter request slots and VOICE readout response slots.
+constexpr uint32_t kPitchCeilingOffset = 68;
+constexpr uint32_t kPitchKneeOffset = 72;
+constexpr uint32_t kVoiceInOffset = 76;
+constexpr uint32_t kVoiceOutOffset = 80;
+constexpr uint32_t kVoiceLimitedOffset = 84;
 constexpr uint32_t kStatusTextBytes = 512;
 
 template <typename T>
@@ -480,6 +486,8 @@ bool WorkerClient::processOneBlock()
     writeAt<float>(ipc_->view, 44, parameters_[kParamRmsMix].load(std::memory_order_relaxed));
     writeAt<float>(ipc_->view, 48, parameters_[kParamThreshold].load(std::memory_order_relaxed));
     writeAt<uint32_t>(ipc_->view, 64, static_cast<uint32_t>(std::round(parameters_[kParamF0Method].load(std::memory_order_relaxed))));
+    writeAt<float>(ipc_->view, kPitchCeilingOffset, parameters_[kParamPitchCeiling].load(std::memory_order_relaxed));
+    writeAt<float>(ipc_->view, kPitchKneeOffset, parameters_[kParamPitchKnee].load(std::memory_order_relaxed));
     std::memcpy(static_cast<unsigned char*>(ipc_->view) + kInputOffset, requestBuffer_.data(), frames * sizeof(float));
     SetEvent(ipc_->requestEvent);
 
@@ -502,6 +510,9 @@ bool WorkerClient::processOneBlock()
     }
 
     inferMs_.store(readAt<float>(ipc_->view, 56), std::memory_order_relaxed);
+    voiceInHz_.store(readAt<float>(ipc_->view, kVoiceInOffset), std::memory_order_relaxed);
+    voiceOutHz_.store(readAt<float>(ipc_->view, kVoiceOutOffset), std::memory_order_relaxed);
+    voiceLimitedPercent_.store(readAt<float>(ipc_->view, kVoiceLimitedOffset), std::memory_order_relaxed);
     std::memcpy(responseBuffer_.data(), static_cast<unsigned char*>(ipc_->view) + kOutputOffset, frames * sizeof(float));
     if (outputRing_.push(responseBuffer_.data(), frames) != frames)
         droppedBlocks_.fetch_add(1, std::memory_order_relaxed);

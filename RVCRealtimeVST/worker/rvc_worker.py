@@ -14,7 +14,7 @@ import traceback
 from pathlib import Path
 
 MAGIC = 0x50564352
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 HEADER_BYTES = 4096
 MAX_FRAMES = 1048576
 # infer/rtrvc.py keeps a fixed-size pitch cache of this many 10 ms frames.
@@ -25,6 +25,13 @@ MAP_BYTES = HEADER_BYTES + MAX_FRAMES * 4 * 2
 INPUT_OFFSET = HEADER_BYTES
 OUTPUT_OFFSET = HEADER_BYTES + MAX_FRAMES * 4
 STATUS_TEXT_OFFSET = 128
+# Request slots written by the plugin for every block.
+PITCH_CEILING_OFFSET = 68
+PITCH_KNEE_OFFSET = 72
+# Response slots read back by the plugin for the VOICE readout.
+VOICE_IN_OFFSET = 76
+VOICE_OUT_OFFSET = 80
+VOICE_LIMITED_OFFSET = 84
 STATUS_TEXT_BYTES = 512
 
 STATUS_STARTING = 1
@@ -37,6 +44,41 @@ SYNCHRONIZE = 0x00100000
 EVENT_MODIFY_STATE = 0x0002
 WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 258
+
+
+# A ceiling at or above this is treated as "off": rtrvc already clamps the
+# coarse pitch embedding at 1100 Hz, so there is nothing left to limit.
+PITCH_CEILING_OFF_HZ = 1100.0
+# Rolling window for the VOICE readout (10 ms frames).
+VOICE_STATS_FRAMES = 3000
+# Frames quieter than this are left out of the readout. rtrvc interpolates F0
+# across unvoiced frames, so silence would otherwise drag the median around.
+VOICE_STATS_MIN_DBFS = -45.0
+
+
+def hz_to_midi(hz):
+    import numpy as np
+    return 12.0 * np.log2(np.asarray(hz, dtype=np.float64) / 440.0) + 69.0
+
+
+def midi_to_hz(midi):
+    import numpy as np
+    return 440.0 * np.power(2.0, (np.asarray(midi, dtype=np.float64) - 69.0) / 12.0)
+
+
+def soft_ceiling_midi(midi, knee_midi: float, ceiling_midi: float):
+    """Leave pitch below the knee untouched and compress everything above it
+    so it approaches, but never exceeds, the ceiling. tanh keeps the curve
+    continuous with slope 1 at the knee, so there is no audible corner."""
+    import numpy as np
+    midi = np.asarray(midi, dtype=np.float64)
+    width = ceiling_midi - knee_midi
+    if width <= 0:
+        return np.minimum(midi, ceiling_midi)
+    over = midi > knee_midi
+    out = midi.copy()
+    out[over] = knee_midi + width * np.tanh((midi[over] - knee_midi) / width)
+    return out
 
 
 def write_value(shared: mmap.mmap, offset: int, fmt: str, value) -> None:
@@ -169,10 +211,90 @@ class RVCStreamEngine:
         self.last_formant = None
         self.last_index_rate = None
 
+        # Pitch limiter. rtrvc multiplies F0 by a fixed transpose; wrap its
+        # get_f0 so the shifted contour can be compressed below a ceiling
+        # before it reaches the model, without patching the shared RVC code.
+        self.pitch_ceiling_hz = 0.0
+        self.pitch_knee_st = 5.0
+        self.last_f0 = None
+        original_get_f0 = self.rvc.get_f0
+
+        def limited_get_f0(x, f0_up_key, method="rmvpe"):
+            coarse, f0 = original_get_f0(x, f0_up_key, method)
+            limited = self.limit_f0(f0)
+            self.last_f0 = (f0, limited, float(f0_up_key))
+            if limited is f0:
+                return coarse, f0
+            return self.rvc.get_f0_post(limited)
+
+        self.rvc.get_f0 = limited_get_f0
+        self.reset_voice_stats()
+
+    def reset_voice_stats(self) -> None:
+        from collections import deque
+        self.voice_in = deque(maxlen=VOICE_STATS_FRAMES)
+        self.voice_out = deque(maxlen=VOICE_STATS_FRAMES)
+        self.voice_limited = deque(maxlen=VOICE_STATS_FRAMES)
+        self.voice_in_hz = 0.0
+        self.voice_out_hz = 0.0
+        self.voice_limited_pct = 0.0
+
+    def limiter_active(self) -> bool:
+        return 0.0 < self.pitch_ceiling_hz < PITCH_CEILING_OFF_HZ
+
+    def limit_f0(self, f0):
+        """Apply the soft ceiling to a shifted F0 tensor (Hz, 0 = unvoiced)."""
+        if not self.limiter_active():
+            return f0
+        torch = self.torch
+        ceiling_midi = float(hz_to_midi(self.pitch_ceiling_hz))
+        knee_midi = ceiling_midi - max(0.1, float(self.pitch_knee_st))
+        knee_hz = float(midi_to_hz(knee_midi))
+        over = f0 > knee_hz
+        if not bool(over.any()):
+            return f0
+        width = ceiling_midi - knee_midi
+        midi = 12.0 * torch.log2(f0[over] / 440.0) + 69.0
+        compressed = knee_midi + width * torch.tanh((midi - knee_midi) / width)
+        limited = f0.clone()
+        limited[over] = 440.0 * torch.pow(2.0, (compressed - 69.0) / 12.0)
+        return limited
+
+    def update_voice_stats(self, block_audio) -> None:
+        """Track where the input voice and the converted pitch sit, using the
+        F0 frames that belong to the block just processed."""
+        np = self.np
+        if self.last_f0 is None:
+            return
+        shifted, limited, key = self.last_f0
+        frames = self.block_frame // self.zc
+        if frames <= 0:
+            return
+        shifted = shifted.detach().float().cpu().numpy().reshape(-1)
+        limited = limited.detach().float().cpu().numpy().reshape(-1)
+        # rtrvc keeps pitch[3:-1] of every call, so the newest usable frames
+        # end one frame before the end of the extracted contour.
+        tail = slice(-(frames + 1), -1)
+        shifted = shifted[tail]
+        limited = limited[tail]
+        audio = np.asarray(block_audio, dtype=np.float32)[: frames * self.zc]
+        if audio.size < frames * self.zc or shifted.size != frames:
+            return
+        rms = np.sqrt(np.mean(audio.reshape(frames, self.zc) ** 2, axis=1) + 1e-12)
+        voiced = (20.0 * np.log10(rms) > VOICE_STATS_MIN_DBFS) & (shifted > 0)
+        if not voiced.any():
+            return
+        self.voice_in.extend((shifted[voiced] / 2.0 ** (key / 12.0)).tolist())
+        self.voice_out.extend(limited[voiced].tolist())
+        self.voice_limited.extend((limited[voiced] < shifted[voiced] * 2.0 ** (-0.5 / 12.0)).tolist())
+        self.voice_in_hz = float(np.median(self.voice_in))
+        self.voice_out_hz = float(np.median(self.voice_out))
+        self.voice_limited_pct = 100.0 * float(np.mean(self.voice_limited))
+
     def prewarm(self) -> None:
         phase = self.torch.arange(self.block_frame, device=self.config.device, dtype=self.torch.float32)
         probe = 0.05 * self.torch.sin(2 * self.np.pi * 220.0 * phase / self.sample_rate)
-        self.process(probe.cpu().numpy(), 12.0, 0.0, 0.0, 0.5, -60.0, 0)
+        self.process(probe.cpu().numpy(), 12.0, 0.0, 0.0, 0.5, -60.0, 0, 0.0, 5.0)
         if self.torch.device(self.config.device).type == "cuda":
             self.torch.cuda.synchronize(self.config.device)
 
@@ -184,9 +306,12 @@ class RVCStreamEngine:
             self.rvc.cache_pitch.zero_()
         if hasattr(self.rvc, "cache_pitchf"):
             self.rvc.cache_pitchf.zero_()
+        self.last_f0 = None
+        self.reset_voice_stats()
 
     def process(self, audio, pitch: float, formant: float, index_rate: float,
-                rms_mix: float, threshold: float, f0_method: int):
+                rms_mix: float, threshold: float, f0_method: int,
+                pitch_ceiling_hz: float = 0.0, pitch_knee_st: float = 5.0):
         np = self.np
         torch = self.torch
         F = self.F
@@ -203,7 +328,18 @@ class RVCStreamEngine:
             self.rvc.change_index_rate(index_rate)
             self.last_index_rate = index_rate
 
+        self.pitch_ceiling_hz = float(pitch_ceiling_hz)
+        self.pitch_knee_st = float(pitch_knee_st)
+        # The readout is a rolling median, so frames converted with earlier
+        # settings would keep skewing it for a long time. Start over whenever
+        # anything that moves the output pitch changes.
+        settings = (float(pitch) - float(formant), self.pitch_ceiling_hz, self.pitch_knee_st)
+        if settings != getattr(self, "voice_settings", None):
+            self.voice_settings = settings
+            self.reset_voice_stats()
+
         indata = np.asarray(audio, dtype=np.float32).copy()
+        raw_block = indata.copy()
         if threshold > -60.0:
             gated = np.append(self.rms_buffer, indata)
             rms = self.librosa.feature.rms(y=gated, frame_length=4 * self.zc, hop_length=self.zc)[:, 2:]
@@ -235,6 +371,7 @@ class RVCStreamEngine:
             self.return_length,
             method,
         )
+        self.update_voice_stats(raw_block)
         if self.resampler2 is not None:
             infer_wav = self.run_cuda_graph(
                 self.resampler2,
@@ -320,8 +457,13 @@ def run(args: argparse.Namespace) -> int:
                 read_value(shared, 44, "f"),
                 read_value(shared, 48, "f"),
                 read_value(shared, 64, "I"),
+                read_value(shared, PITCH_CEILING_OFFSET, "f"),
+                read_value(shared, PITCH_KNEE_OFFSET, "f"),
             )
             output_view[:frames] = processed
+            write_value(shared, VOICE_IN_OFFSET, "f", engine.voice_in_hz)
+            write_value(shared, VOICE_OUT_OFFSET, "f", engine.voice_out_hz)
+            write_value(shared, VOICE_LIMITED_OFFSET, "f", engine.voice_limited_pct)
             write_value(shared, 56, "f", (time.perf_counter() - started) * 1000.0)
             write_value(shared, 16, "I", sequence)
             write_value(shared, 8, "i", STATUS_READY)

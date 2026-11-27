@@ -25,6 +25,8 @@ enum EParams {
   kF0Method,
   kDryWet,
   kOutputGain,
+  kPitchCeiling,
+  kPitchKnee,
   kNumParams
 };
 
@@ -35,7 +37,8 @@ enum EControlTags {
   kCtrlRvcRoot,
   kCtrlPythonPath,
   kCtrlModelName,
-  kCtrlIndexName
+  kCtrlIndexName,
+  kCtrlVoice
 };
 
 using namespace iplug;

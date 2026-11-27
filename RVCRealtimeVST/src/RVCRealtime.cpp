@@ -139,6 +139,11 @@ const char* StatusName(const int status)
   }
 }
 
+// Plugin params are forwarded to the worker by index, so both enums must line
+// up exactly; the worker-only ids (status, timing) come after them.
+static_assert(static_cast<int>(kNumParams) == static_cast<int>(rvc::kParamStatus),
+              "EParams and rvc::ParameterId are out of sync");
+
 } // namespace
 
 RVCRealtime::RVCRealtime(const InstanceInfo& info)
@@ -156,6 +161,12 @@ RVCRealtime::RVCRealtime(const InstanceInfo& info)
   GetParam(kF0Method)->InitEnum("F0 Method", 0, {"RMVPE", "FCPE", "PM"});
   GetParam(kDryWet)->InitDouble("Mix", 100.0, 0.0, 100.0, 0.1, "%");
   GetParam(kOutputGain)->InitDouble("Output", 0.0, -18.0, 12.0, 0.1, "dB");
+  // Pitch limiter: the shifted pitch is compressed above (ceiling - knee) and
+  // never exceeds the ceiling. The top of the range means off, which keeps
+  // the original fixed-transpose behaviour.
+  GetParam(kPitchCeiling)->InitDouble("Pitch Ceiling", 1100.0, 300.0, 1100.0, 1.0, "Hz");
+  GetParam(kPitchCeiling)->SetDisplayText(1100.0, "Off");
+  GetParam(kPitchKnee)->InitDouble("Pitch Knee", 5.0, 1.0, 12.0, 0.1, "st");
 
   LoadUserConfiguration();
   if (mPythonPath.GetLength() == 0 && mRvcRoot.GetLength() > 0) {
@@ -232,17 +243,19 @@ RVCRealtime::RVCRealtime(const InstanceInfo& info)
     graphics->AttachControl(new ITextControl(IRECT(96, 266, 750, 290), "Select RVC root and Python runtime",
                                               IText(12.f, kAmber, "Roboto-Regular", EAlign::Near)), kCtrlStatusDetail);
 
-    // 3x3 slider grid
+    // Slider grid: 3 columns, the fourth row is the pitch limiter
     struct SliderLayout { int param; const char* label; };
     const SliderLayout sliders[] = {
       {kPitch, "PITCH"}, {kFormant, "FORMANT"}, {kIndexRate, "INDEX"},
       {kRmsMix, "RMS MIX"}, {kThreshold, "GATE"}, {kDryWet, "MIX"},
-      {kBlockMs, "BLOCK"}, {kCrossfadeMs, "CROSSFADE"}, {kExtraMs, "CONTEXT"}
+      {kBlockMs, "BLOCK"}, {kCrossfadeMs, "CROSSFADE"}, {kExtraMs, "CONTEXT"},
+      {kPitchCeiling, "CEILING"}, {kPitchKnee, "KNEE"}
     };
+    constexpr int kSliderCount = static_cast<int>(sizeof(sliders) / sizeof(sliders[0]));
     const float gridLeft = 30.f, gridTop = 300.f;
     const float cellWidth = 226.f, cellHeight = 62.f;
     const float gapX = 21.f, gapY = 10.f;
-    for (int i = 0; i < 9; ++i) {
+    for (int i = 0; i < kSliderCount; ++i) {
       const int column = i % 3;
       const int row = i / 3;
       const float x = gridLeft + column * (cellWidth + gapX);
@@ -252,9 +265,20 @@ RVCRealtime::RVCRealtime(const InstanceInfo& info)
       graphics->AttachControl(new RVCSliderControl(cell.GetPadded(-8.f), sliders[i].param,
                                                    sliders[i].label, style, true, EDirection::Horizontal));
     }
+    {
+      // VOICE readout in the last cell of the limiter row
+      const float x = gridLeft + 2 * (cellWidth + gapX);
+      const float y = gridTop + 3 * (cellHeight + gapY);
+      const IRECT cell(x, y, x + cellWidth, y + cellHeight);
+      graphics->AttachControl(new IPanelControl(cell, kPanel));
+      graphics->AttachControl(new ITextControl(cell.GetFromTop(26.f).GetTranslated(0.f, 6.f), "VOICE",
+                                                IText(13.f, kMuted, "Roboto-Regular", EAlign::Center)));
+      graphics->AttachControl(new ITextControl(cell.GetFromBottom(32.f).GetTranslated(0.f, -4.f), "--",
+                                                IText(13.f, kText, "Roboto-Regular", EAlign::Center)), kCtrlVoice);
+    }
 
     // Bottom row: F0 method, output gain, engine toggle — one shared baseline
-    const float bottomY = 566.f, bottomHeight = 44.f;
+    const float bottomY = 638.f, bottomHeight = 44.f;
     graphics->AttachControl(new ITextControl(IRECT(30, bottomY, 100, bottomY + bottomHeight), "F0 METHOD",
                                               IText(12.f, kMuted, "Roboto-Regular", EAlign::Near)));
     graphics->AttachControl(new IVMenuButtonControl(IRECT(104, bottomY, 236, bottomY + bottomHeight), kF0Method,
@@ -413,6 +437,14 @@ void RVCRealtime::OnIdle()
     detail->As<ITextControl>()->SetStr(validationMessage.empty() ? mWorker.statusText().c_str() : validationMessage.c_str());
   if (auto* performance = GetUI()->GetControlWithTag(kCtrlPerformance))
     performance->As<ITextControl>()->SetStrFmt(80, "%.0f ms / %.0f drop", mWorker.inferMs(), mWorker.droppedBlocks());
+  if (auto* voice = GetUI()->GetControlWithTag(kCtrlVoice)) {
+    const float in = mWorker.voiceInHz();
+    if (mWorker.isReady() && in > 0.0f)
+      voice->As<ITextControl>()->SetStrFmt(80, "%.0f Hz -> %.0f Hz  (%.0f%% limited)", in, mWorker.voiceOutHz(),
+                                           mWorker.voiceLimitedPercent());
+    else
+      voice->As<ITextControl>()->SetStr("--");
+  }
 #endif
 }
 
@@ -452,7 +484,11 @@ int RVCRealtime::UnserializeState(const IByteChunk& chunk, int startPos)
   mWorker.setPath(rvc::kStateIndexPath, index.Get());
   mWorker.setPath(rvc::kStateRvcRoot, root.Get());
   mWorker.setPath(rvc::kStatePythonPath, python.Get());
-  startPos = UnserializeParams(chunk, startPos);
+  const int paramsEnd = UnserializeParams(chunk, startPos);
+  // Older builds saved fewer params. UnserializeParams applies the ones it
+  // finds and reports -1 when the chunk runs out; the missing params keep
+  // their defaults, so treat that as a complete, successful load.
+  startPos = paramsEnd >= 0 ? paramsEnd : chunk.Size();
   SyncParametersToWorker();
   UpdateFileLabels();
   return startPos;

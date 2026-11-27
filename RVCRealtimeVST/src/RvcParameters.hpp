@@ -17,6 +17,8 @@ enum ParameterId : uint32_t {
     kParamF0Method,
     kParamDryWet,
     kParamOutputGain,
+    kParamPitchCeiling,
+    kParamPitchKnee,
     kParamStatus,
     kParamInferMs,
     kParamDroppedBlocks,
@@ -52,6 +54,8 @@ inline constexpr const char* extraMs = "extra_ms";
 inline constexpr const char* f0Method = "f0_method";
 inline constexpr const char* dryWet = "mix";
 inline constexpr const char* outputGain = "output_gain";
+inline constexpr const char* pitchCeiling = "pitch_ceiling";
+inline constexpr const char* pitchKnee = "pitch_knee";
 } // namespace ids
 
 inline const char* stateKey(const StateId id)
